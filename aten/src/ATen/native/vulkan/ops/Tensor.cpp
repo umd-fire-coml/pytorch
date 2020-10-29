@@ -32,24 +32,6 @@ VkDeviceSize bytes(
   return size;
 }
 
-VkFormat convert(const caffe2::TypeMeta dtype) {
-  switch (c10::typeMetaToScalarType(dtype)) {
-    case kFloat:
-#ifdef VULKAN_FP16_INFERENCE
-      return VK_FORMAT_R16G16B16A16_SFLOAT;
-#else
-      return VK_FORMAT_R32G32B32A32_SFLOAT;
-#endif /* VULKAN_FP16_INFERENCE */
-
-    default:
-      TORCH_CHECK(
-        false,
-        "Vulkan tensor format not supported!");
-  }
-
-  return VK_FORMAT_UNDEFINED;
-}
-
 vTensor::Access::Flags convert(const VkAccessFlags vk_access) {
   vTensor::Access::Flags access = 0u;
 
@@ -78,19 +60,28 @@ vTensor::Access::Flags convert(const VkAccessFlags vk_access) {
 }
 
 vTensor::Buffer allocate_buffer(
-    api::Context* const context,
+    const api::Adapter* const adapter,
+    api::Resource::Pool* const pool,
     const IntArrayRef sizes,
     const TensorOptions& options) {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      adapter,
+      "Invalid Vulkan adapter!");
+
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      pool,
+      "Invalid Vulkan resource pool!");
+
   TORCH_CHECK(!sizes.empty(), "Invalid Vulkan tensor size!");
   verify(options);
 
   // Forward declaration
-  bool requires_staging(api::Context*);
+  bool requires_staging(const api::Adapter*);
 
-  const VkFlags usage = [context]() {
+  const VkFlags usage = [adapter]() {
     VkFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-    if (requires_staging(context)) {
+    if (requires_staging(adapter)) {
       usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     }
@@ -98,8 +89,8 @@ vTensor::Buffer allocate_buffer(
     return usage;
   }();
 
-  const auto memory = [context]() -> api::Resource::Memory::Descriptor {
-    if (requires_staging(context)) {
+  const auto memory = [adapter]() -> api::Resource::Memory::Descriptor {
+    if (requires_staging(adapter)) {
       return {
         VMA_MEMORY_USAGE_GPU_ONLY,
         0u,
@@ -114,15 +105,14 @@ vTensor::Buffer allocate_buffer(
     };
   }();
 
-  return context->resource().pool.buffer(
-      vTensor::Buffer::Descriptor{
-        bytes(sizes, options.dtype()),
-        // Usage
-        {
-          usage,
-          memory,
-        },
-      });
+  return pool->buffer({
+      bytes(sizes, options.dtype()),
+      // Usage
+      {
+        usage,
+        memory,
+      },
+    });
 }
 
 bool requires_image(const IntArrayRef sizes) {
@@ -165,69 +155,87 @@ VkExtent3D image_extents(const IntArrayRef sizes) {
   return {
     width,
     height,
-    api::div_up(depth, 4u),
+    api::utils::div_up(depth, 4u),
   };
 }
 
 vTensor::Image allocate_image(
-    api::Context* const context,
+    api::Resource::Pool* const pool,
     const VkExtent3D& extents,
     const TensorOptions& options) {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      pool,
+      "Invalid Vulkan resource pool!");
+
   verify(options);
 
-  return context->resource().pool.image(
-      vTensor::Image::Descriptor{
-        VK_IMAGE_TYPE_3D,
-        convert(options.dtype()),
-        extents,
-        // Usage
+  return pool->image({
+      VK_IMAGE_TYPE_3D,
+      api::utils::convert(options.dtype()),
+      extents,
+      // Usage
+      {
+        VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT,
         {
-          VK_IMAGE_USAGE_SAMPLED_BIT |
-              VK_IMAGE_USAGE_STORAGE_BIT,
-          {
-            VMA_MEMORY_USAGE_GPU_ONLY,
-            0u,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-          },
+          VMA_MEMORY_USAGE_GPU_ONLY,
+          0u,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         },
-        // View
-        {
-          VK_IMAGE_VIEW_TYPE_3D,
-          convert(options.dtype()),
-        },
-      });
+      },
+      // View
+      {
+        VK_IMAGE_VIEW_TYPE_3D,
+        api::utils::convert(options.dtype()),
+      },
+    });
 }
 
-bool requires_staging(api::Context* const context) {
-  return !context->gpu().adapter->has_unified_memory();
+bool requires_staging(const api::Adapter* const adapter) {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      adapter,
+      "Invalid Vulkan adapter!");
+
+  return !adapter->has_unified_memory();
 }
 
 vTensor::Buffer allocate_staging(
-    api::Context* const context,
+    const api::Adapter* const adapter,
+    api::Resource::Pool* const pool,
     const IntArrayRef sizes,
     const TensorOptions& options) {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      adapter,
+      "Invalid Vulkan adapter!");
+
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      pool,
+      "Invalid Vulkan resource pool!");
+
   TORCH_CHECK(!sizes.empty(), "Invalid Vulkan tensor size!");
   verify(options);
 
-  return context->resource().pool.buffer(
-      vTensor::Buffer::Descriptor{
-        bytes(sizes, options.dtype()),
-        // Usage
+  return pool->buffer({
+      bytes(sizes, options.dtype()),
+      // Usage
+      {
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         {
-          VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          {
-            VMA_MEMORY_USAGE_CPU_ONLY,
-            0u,
-            0u,
-          },
+          VMA_MEMORY_USAGE_CPU_ONLY,
+          0u,
+          0u,
         },
-      });
+      },
+    });
 }
 
-vTensor::Fence allocate_fence(
-    api::Context* const context) {
-  return context->resource().pool.fence();
+vTensor::Fence allocate_fence(api::Resource::Pool* const pool) {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      pool,
+      "Invalid Vulkan resource pool!");
+
+  return pool->fence();
 }
 
 enum class Barrier {
@@ -278,8 +286,21 @@ vTensor::vTensor(
     api::Context* const context,
     const IntArrayRef sizes,
     const TensorOptions& options)
+  : vTensor(
+      context,
+      &context->resource().pool,
+      sizes,
+      options) {
+}
+
+vTensor::vTensor(
+    api::Context* const context,
+    api::Resource::Pool* const pool,
+    const IntArrayRef sizes,
+    const TensorOptions& options)
   : view_(new View{
       context,
+      pool,
       sizes,
       options,
     }) {
@@ -343,6 +364,7 @@ vTensor::View::View()
     fence_{},
     // Context
     context_(nullptr),
+    pool_(nullptr),
     // State
     state_{},
     // Metadata
@@ -351,6 +373,7 @@ vTensor::View::View()
 
 vTensor::View::View(
     api::Context* const context,
+    api::Resource::Pool* const pool,
     const IntArrayRef sizes,
     const TensorOptions& options)
     // Resources
@@ -360,8 +383,9 @@ vTensor::View::View(
     fence_{},
     // Context
     context_(context),
+    pool_(pool),
     // State
-    state_(context, sizes),
+    state_(context->gpu().adapter, sizes),
     // Metadata
     extents_(image_extents(sizes)),
     options_(options),
@@ -701,7 +725,7 @@ void vTensor::View::CMD::copy_buffer_to_image(
       buffer,
       // Object lifetime is managed by the resource pool.
       // It is OK not to keep track of the handle.
-      view_.context_->resource().pool.uniform(block).object);
+      view_.pool_->uniform(block).object);
 }
 
 void vTensor::View::CMD::copy_image_to_buffer(
@@ -750,7 +774,7 @@ void vTensor::View::CMD::copy_image_to_buffer(
       buffer,
       // Object lifetime is managed by the resource pool.
       // It is OK not to keep track of the handle.
-      view_.context_->resource().pool.uniform(block).object);
+      view_.pool_->uniform(block).object);
 }
 
 void vTensor::View::CMD::submit(const api::Resource::Fence fence) {
@@ -763,7 +787,8 @@ void vTensor::View::CMD::submit(const api::Resource::Fence fence) {
 vTensor::Buffer& vTensor::View::buffer() const {
   if (!buffer_) {
     buffer_ = allocate_buffer(
-        context_,
+        context_->gpu().adapter,
+        pool_,
         sizes(),
         options());
   }
@@ -847,7 +872,7 @@ vTensor::Buffer& vTensor::View::buffer(
 vTensor::Image& vTensor::View::image() const {
   if (!image_ && state_.is_available(Component::Image)) {
     image_ = allocate_image(
-        context_,
+        pool_,
         extents(),
         options());
   }
@@ -929,7 +954,8 @@ vTensor::Buffer& vTensor::View::staging() const {
 
   if (!staging_) {
     staging_ = allocate_staging(
-        context_,
+        context_->gpu().adapter,
+        pool_,
         sizes(),
         options());
   }
@@ -998,7 +1024,7 @@ vTensor::Memory& vTensor::View::wait() const {
 }
 
 vTensor::Fence& vTensor::View::fence() const {
-  return (fence_ = allocate_fence(context_));
+  return (fence_ = allocate_fence(pool_));
 }
 
 void vTensor::View::verify() const {
@@ -1013,18 +1039,22 @@ vTensor::View::State::State()
 }
 
 vTensor::View::State::State(
-    api::Context* const context,
+    const api::Adapter* const adapter,
     const IntArrayRef sizes)
   : available_{},
     dirty_{},
     bundle_{} {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      adapter,
+      "Invalid Vulkan adapter!");
+
   available_ |= Component::Buffer;
 
   if (requires_image(sizes)) {
     available_ |= Component::Image;
   }
 
-  if (requires_staging(context)) {
+  if (requires_staging(adapter)) {
     available_ |= Component::Staging;
   }
 }
