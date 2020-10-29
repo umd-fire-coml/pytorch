@@ -180,9 +180,7 @@ void normal_kernel(Tensor& self, double mean, double std, RNG generator) {
     normal_fill(self, static_cast<float>(mean), static_cast<float>(std), generator);
 #endif
   } else {
-    // bfloat16 cannot be properly tested due to the lack of other operations
-    // like add/sub/mean implemented for half
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(self.scalar_type(), "normal_kernel_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16, self.scalar_type(), "normal_kernel_cpu", [&] {
       if (size >= 16 && self.is_contiguous()) {
         normal_fill<scalar_t>(self, static_cast<scalar_t>(mean), static_cast<scalar_t>(std), generator);
       } else {
