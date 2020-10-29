@@ -877,15 +877,18 @@ class MultiheadAttention(Module):
             self.v_proj_weight = Parameter(torch.Tensor(embed_dim, self.vdim))
             self.register_parameter('in_proj_weight', None)
         else:
+            # set the weight matrix of q k v as a Parameter tensor
             self.in_proj_weight = Parameter(torch.empty(3 * embed_dim, embed_dim))
             self.register_parameter('q_proj_weight', None)
             self.register_parameter('k_proj_weight', None)
             self.register_parameter('v_proj_weight', None)
 
         if bias:
+            # bias values for q k v outputs
             self.in_proj_bias = Parameter(torch.empty(3 * embed_dim))
         else:
             self.register_parameter('in_proj_bias', None)
+        # create a linear layer
         self.out_proj = _LinearWithBias(embed_dim, embed_dim)
 
         if add_bias_kv:
@@ -899,7 +902,9 @@ class MultiheadAttention(Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
+        # initialize weight values of q k v and biases
         if self._qkv_same_embed_dim:
+            # randomly initialize q k v weights with xavier_uniform algorithm
             xavier_uniform_(self.in_proj_weight)
         else:
             xavier_uniform_(self.q_proj_weight)
