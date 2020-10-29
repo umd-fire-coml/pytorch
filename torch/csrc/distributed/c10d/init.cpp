@@ -1175,6 +1175,33 @@ Arguments:
 
 #undef PROCESS_GROUP_DEPRECATION_WARNING
 
+// TorchBind bindings.
+// Note that these bindings will live together with those pybind
+// bindings above until we resolve all the TorchBind issues and
+// merge these two together
+static auto store_torchbind =
+  torch::class_<::c10d::Store>("dist_c10d", "Store");
+
+// static auto fileStore_torchbind =
+//   torch::class_<::c10d::FileStore>("dist_c10d", "FileStore")
+//     .def(torch::init<std::string, int64_t>());
+
+// Torchbind the ProcessGroup to make it available in TorchScript
+static auto processGroupWork_torchbind =
+  torch::class_<::c10d::ProcessGroup::Work>("dist_c10d", "Work")
+    .def(torch::init<>())
+    .def("is_completed", &::c10d::ProcessGroup::Work::isCompleted)
+    .def("is_success", &::c10d::ProcessGroup::Work::isSuccess)
+    .def("source_rank", &::c10d::ProcessGroup::Work::sourceRank)
+    .def("synchronize", &::c10d::ProcessGroup::Work::synchronize);
+
+static auto processGroup_torchbind =
+  torch::class_<::c10d::ProcessGroup>("dist_c10d", "ProcessGroup");
+
+static auto processGroupNCCL_torchbind =
+    torch::class_<::c10d::ProcessGroupNCCL>("dist_c10d", "ProcessGroupNCCL");
+// .def(torch::init<std::shared_ptr<::c10d::Store>, )
+
 } // namespace
 
 // c10d methods on torch._C
