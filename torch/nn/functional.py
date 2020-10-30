@@ -4088,6 +4088,7 @@ def multi_head_attention_forward(query: Tensor,
         - attn_output_weights: :math:`(N, L, S)` where N is the batch size,
           L is the target sequence length, S is the source sequence length.
     """
+    # torch.jit.is_scripting() is a guard for Python-only methods, which are not exportable.
     if not torch.jit.is_scripting():
         tens_ops = (query, key, value, in_proj_weight, in_proj_bias, bias_k, bias_v,
                     out_proj_weight, out_proj_bias)
@@ -4105,16 +4106,23 @@ def multi_head_attention_forward(query: Tensor,
     assert embed_dim == embed_dim_to_check
     # allow MHA to have different sizes for the feature dimension
     assert key.size(0) == value.size(0) and key.size(1) == value.size(1)
-
+    
+    # each head_dim is a split of embed_dim by the num_heads
     head_dim = embed_dim // num_heads
     assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+    # scaling is used for down-scaling attention weights of dot(Q,K) based on the len of the head dimensions
+    # with large number of head dimensions, dot(Q,K) can get too large
     scaling = float(head_dim) ** -0.5
-
+    
+    # if input and output embeddings are same dim len
     if not use_separate_proj_weight:
+        # if q k v inputs are all equal, either because they all come from the same inputs, or inputs are all 0s
         if torch.equal(query, key) and torch.equal(key, value):
             # self-attention
+            # muliply by the q k v weight matrices and biases
             q, k, v = linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
-
+            
+        # k v inputs are both equal, because they both come from the same encoder features based on the original paper
         elif torch.equal(key, value):
             # encoder-decoder attention
             # This is inline in_proj function with in_proj_weight and in_proj_bias
@@ -4124,6 +4132,7 @@ def multi_head_attention_forward(query: Tensor,
             _w = in_proj_weight[_start:_end, :]
             if _b is not None:
                 _b = _b[_start:_end]
+            # obtain the query output
             q = linear(query, _w, _b)
 
             if key is None:
@@ -4131,7 +4140,6 @@ def multi_head_attention_forward(query: Tensor,
                 k = None
                 v = None
             else:
-
                 # This is inline in_proj function with in_proj_weight and in_proj_bias
                 _b = in_proj_bias
                 _start = embed_dim
@@ -4139,8 +4147,10 @@ def multi_head_attention_forward(query: Tensor,
                 _w = in_proj_weight[_start:, :]
                 if _b is not None:
                     _b = _b[_start:]
+                # obtain the key and value output
                 k, v = linear(key, _w, _b).chunk(2, dim=-1)
 
+        # if q k v inputs are all from different sources
         else:
             # This is inline in_proj function with in_proj_weight and in_proj_bias
             _b = in_proj_bias
@@ -4149,6 +4159,7 @@ def multi_head_attention_forward(query: Tensor,
             _w = in_proj_weight[_start:_end, :]
             if _b is not None:
                 _b = _b[_start:_end]
+            # obtain the query output
             q = linear(query, _w, _b)
 
             # This is inline in_proj function with in_proj_weight and in_proj_bias
@@ -4158,6 +4169,7 @@ def multi_head_attention_forward(query: Tensor,
             _w = in_proj_weight[_start:_end, :]
             if _b is not None:
                 _b = _b[_start:_end]
+            # obtain the key output
             k = linear(key, _w, _b)
 
             # This is inline in_proj function with in_proj_weight and in_proj_bias
@@ -4167,7 +4179,9 @@ def multi_head_attention_forward(query: Tensor,
             _w = in_proj_weight[_start:, :]
             if _b is not None:
                 _b = _b[_start:]
+            # obtain the value output
             v = linear(value, _w, _b)
+    # if input and output embeddings are different dim len
     else:
         q_proj_weight_non_opt = torch.jit._unwrap_optional(q_proj_weight)
         len1, len2 = q_proj_weight_non_opt.size()
@@ -4186,11 +4200,13 @@ def multi_head_attention_forward(query: Tensor,
             k = linear(key, k_proj_weight_non_opt, in_proj_bias[embed_dim:(embed_dim * 2)])
             v = linear(value, v_proj_weight_non_opt, in_proj_bias[(embed_dim * 2):])
         else:
-            q = linear(query, q_proj_weight_non_opt, in_proj_bias)
-            k = linear(key, k_proj_weight_non_opt, in_proj_bias)
-            v = linear(value, v_proj_weight_non_opt, in_proj_bias)
+            q = linear(query, q_proj_weight_non_opt, None)
+            k = linear(key, k_proj_weight_non_opt, None)
+            v = linear(value, v_proj_weight_non_opt, None)
+    # down-scale before dot(q,k)
     q = q * scaling
-
+    
+    # apply attension mask
     if attn_mask is not None:
         assert attn_mask.dtype == torch.float32 or attn_mask.dtype == torch.float64 or \
             attn_mask.dtype == torch.float16 or attn_mask.dtype == torch.uint8 or attn_mask.dtype == torch.bool, \
@@ -4199,10 +4215,12 @@ def multi_head_attention_forward(query: Tensor,
             warnings.warn("Byte tensor for attn_mask in nn.MultiheadAttention is deprecated. Use bool tensor instead.")
             attn_mask = attn_mask.to(torch.bool)
 
+        # 2D mask, num_source to len_target mask for all batches
         if attn_mask.dim() == 2:
-            attn_mask = attn_mask.unsqueeze(0)
+            attn_mask = attn_mask.unsqueeze(0)  # insert one dimension to front
             if list(attn_mask.size()) != [1, query.size(0), key.size(0)]:
                 raise RuntimeError('The size of the 2D attn_mask is not correct.')
+        # 3D mask, num_source to len_target mask for each num_head * len_batch
         elif attn_mask.dim() == 3:
             if list(attn_mask.size()) != [bsz * num_heads, query.size(0), key.size(0)]:
                 raise RuntimeError('The size of the 3D attn_mask is not correct.')
@@ -4217,6 +4235,7 @@ def multi_head_attention_forward(query: Tensor,
 
     if bias_k is not None and bias_v is not None:
         if static_k is None and static_v is None:
+            # start here next time
             k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
