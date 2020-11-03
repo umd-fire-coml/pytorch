@@ -4102,6 +4102,8 @@ def multi_head_attention_forward(query: Tensor,
                 use_separate_proj_weight=use_separate_proj_weight,
                 q_proj_weight=q_proj_weight, k_proj_weight=k_proj_weight,
                 v_proj_weight=v_proj_weight, static_k=static_k, static_v=static_v)
+        
+    # extract the dim sizes
     tgt_len, bsz, embed_dim = query.size()
     assert embed_dim == embed_dim_to_check
     # allow MHA to have different sizes for the feature dimension
@@ -4110,16 +4112,17 @@ def multi_head_attention_forward(query: Tensor,
     # each head_dim is a split of embed_dim by the num_heads
     head_dim = embed_dim // num_heads
     assert head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+    
     # scaling is used for down-scaling attention weights of dot(Q,K) based on the len of the head dimensions
-    # with large number of head dimensions, dot(Q,K) can get too large
+    # with large number of head dimensions, dot(Q,K) can get too large, explained in the attention paper
     scaling = float(head_dim) ** -0.5
     
+    # get the q k v outputs from the q k v inputs, weights, and biases
     # if input and output embeddings are same dim len
     if not use_separate_proj_weight:
         # if q k v inputs are all equal, either because they all come from the same inputs, or inputs are all 0s
         if torch.equal(query, key) and torch.equal(key, value):
             # self-attention
-            # muliply by the q k v weight matrices and biases
             q, k, v = linear(query, in_proj_weight, in_proj_bias).chunk(3, dim=-1)
             
         # k v inputs are both equal, because they both come from the same encoder features based on the original paper
@@ -4150,7 +4153,7 @@ def multi_head_attention_forward(query: Tensor,
                 # obtain the key and value output
                 k, v = linear(key, _w, _b).chunk(2, dim=-1)
 
-        # if q k v inputs are all from different sources
+        # if q k v inputs are all different values, used in the architecture of DETR’s transformer
         else:
             # This is inline in_proj function with in_proj_weight and in_proj_bias
             _b = in_proj_bias
@@ -4181,6 +4184,7 @@ def multi_head_attention_forward(query: Tensor,
                 _b = _b[_start:]
             # obtain the value output
             v = linear(value, _w, _b)
+            
     # if input and output embeddings are different dim len
     else:
         q_proj_weight_non_opt = torch.jit._unwrap_optional(q_proj_weight)
@@ -4203,39 +4207,45 @@ def multi_head_attention_forward(query: Tensor,
             q = linear(query, q_proj_weight_non_opt, None)
             k = linear(key, k_proj_weight_non_opt, None)
             v = linear(value, v_proj_weight_non_opt, None)
+            
     # down-scale before dot(q,k)
     q = q * scaling
     
-    # apply attension mask
+    # apply attention mask
     if attn_mask is not None:
         assert attn_mask.dtype == torch.float32 or attn_mask.dtype == torch.float64 or \
             attn_mask.dtype == torch.float16 or attn_mask.dtype == torch.uint8 or attn_mask.dtype == torch.bool, \
             'Only float, byte, and bool types are supported for attn_mask, not {}'.format(attn_mask.dtype)
+        
         if attn_mask.dtype == torch.uint8:
             warnings.warn("Byte tensor for attn_mask in nn.MultiheadAttention is deprecated. Use bool tensor instead.")
             attn_mask = attn_mask.to(torch.bool)
 
-        # 2D mask, num_source to len_target mask for all batches
+        # check 2D mask, same sized source to target mask for all batches
         if attn_mask.dim() == 2:
             attn_mask = attn_mask.unsqueeze(0)  # insert one dimension to front
             if list(attn_mask.size()) != [1, query.size(0), key.size(0)]:
                 raise RuntimeError('The size of the 2D attn_mask is not correct.')
-        # 3D mask, num_source to len_target mask for each num_head * len_batch
+                
+        # check 3D mask, different source to target mask for each num_head * len_batch
         elif attn_mask.dim() == 3:
             if list(attn_mask.size()) != [bsz * num_heads, query.size(0), key.size(0)]:
                 raise RuntimeError('The size of the 3D attn_mask is not correct.')
         else:
             raise RuntimeError("attn_mask's dimension {} is not supported".format(attn_mask.dim()))
-        # attn_mask's dim is 3 now.
+        # attn_mask's dim is now 3
 
     # convert ByteTensor key_padding_mask to bool
+    # key_padding_mask is used to remove the img features from padded parts of the image
     if key_padding_mask is not None and key_padding_mask.dtype == torch.uint8:
         warnings.warn("Byte tensor for key_padding_mask in nn.MultiheadAttention is deprecated. Use bool tensor instead.")
         key_padding_mask = key_padding_mask.to(torch.bool)
 
+    #
     if bias_k is not None and bias_v is not None:
         if static_k is None and static_v is None:
-            # start here next time
+
+            # pair up the k output values with k biases, on the first dim
             k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
