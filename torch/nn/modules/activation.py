@@ -861,16 +861,19 @@ class MultiheadAttention(Module):
 
     def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False, kdim=None, vdim=None):
         super(MultiheadAttention, self).__init__()
+        # set up the dim lens
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
         self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
 
+        # set up the heads and head_dim lens
         self.num_heads = num_heads
         self.dropout = dropout
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
 
+        # create the tensor to store the q k v weights
         if self._qkv_same_embed_dim is False:
             self.q_proj_weight = Parameter(torch.Tensor(embed_dim, embed_dim))
             self.k_proj_weight = Parameter(torch.Tensor(embed_dim, self.kdim))
@@ -883,14 +886,16 @@ class MultiheadAttention(Module):
             self.register_parameter('k_proj_weight', None)
             self.register_parameter('v_proj_weight', None)
 
+        # create the tensor to store the q k v biaes
         if bias:
-            # bias values for q k v outputs
             self.in_proj_bias = Parameter(torch.empty(3 * embed_dim))
         else:
             self.register_parameter('in_proj_bias', None)
-        # create a linear layer
+            
+        # create a linear layer after the q k v projections
         self.out_proj = _LinearWithBias(embed_dim, embed_dim)
 
+        # create the tensor to store the extra bias for k v (for -inf values? for softmax)
         if add_bias_kv:
             self.bias_k = Parameter(torch.empty(1, 1, embed_dim))
             self.bias_v = Parameter(torch.empty(1, 1, embed_dim))
@@ -899,18 +904,19 @@ class MultiheadAttention(Module):
 
         self.add_zero_attn = add_zero_attn
 
+        # initialize the weights and biases for q k v
         self._reset_parameters()
 
     def _reset_parameters(self):
-        # initialize weight values of q k v and biases
+        # randomly initialize weight values of q k v with xavier_uniform algorithm
         if self._qkv_same_embed_dim:
-            # randomly initialize q k v weights with xavier_uniform algorithm
             xavier_uniform_(self.in_proj_weight)
         else:
             xavier_uniform_(self.q_proj_weight)
             xavier_uniform_(self.k_proj_weight)
             xavier_uniform_(self.v_proj_weight)
-
+            
+        # randomly initialize bias values of q k v with xavier_uniform or with all 0s
         if self.in_proj_bias is not None:
             constant_(self.in_proj_bias, 0.)
             constant_(self.out_proj.bias, 0.)
